@@ -1,10 +1,12 @@
+import http.client
 import json
 import threading
 import unittest
 from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-from mock_server import DRIVE_ID, SITE_ID, create_server
+from mock_server import DRIVE_ID, MOCK_TENANT_ID, SITE_ID, create_server
 
 
 class GraphMockTests(unittest.TestCase):
@@ -105,6 +107,43 @@ class GraphMockTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as error:
             self.request(f"/v1.0/drives/{DRIVE_ID}/items/file-scorecard/content")
         self.assertEqual(error.exception.code, 500)
+        error.exception.close()
+
+    def _admin_consent_redirect(self, extra_query: str = "") -> tuple[int, dict]:
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        try:
+            conn.request(
+                "GET",
+                "/organizations/v2.0/adminconsent"
+                "?client_id=mock-client-id&redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback&state=abc123"
+                + extra_query,
+            )
+            response = conn.getresponse()
+            location = response.getheader("Location")
+            response.read()
+            return response.status, dict(parse_qs(urlparse(location).query, keep_blank_values=True))
+        finally:
+            conn.close()
+
+    def test_admin_consent_redirects_with_approval_by_default(self):
+        status, params = self._admin_consent_redirect()
+        self.assertEqual(status, 302)
+        self.assertEqual(params["admin_consent"], ["True"])
+        self.assertEqual(params["tenant"], [MOCK_TENANT_ID])
+        self.assertEqual(params["state"], ["abc123"])
+
+    def test_admin_consent_denied_scenario_redirects_with_error(self):
+        self.post("/__admin/scenario", {"scenario": "admin_consent_denied"})
+        status, params = self._admin_consent_redirect()
+        self.assertEqual(status, 302)
+        self.assertEqual(params["error"], ["access_denied"])
+        self.assertEqual(params["state"], ["abc123"])
+        self.assertNotIn("admin_consent", params)
+
+    def test_admin_consent_requires_redirect_uri(self):
+        with self.assertRaises(HTTPError) as error:
+            self.request("/organizations/v2.0/adminconsent?state=abc123", token=False)
+        self.assertEqual(error.exception.code, 400)
         error.exception.close()
 
 

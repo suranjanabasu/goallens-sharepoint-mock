@@ -16,7 +16,7 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 
 ROOT = Path(__file__).resolve().parent
@@ -36,7 +36,10 @@ SCENARIOS = {
     "deleted",
     "restored",
     "download_failure",
+    "admin_consent_denied",
 }
+
+MOCK_TENANT_ID = "mocktenant"
 
 
 class MockState:
@@ -177,6 +180,9 @@ class GraphMockHandler(BaseHTTPRequestHandler):
         if path == "/__admin/state":
             self._json(HTTPStatus.OK, self.state.snapshot())
             return
+        if path == "/organizations/v2.0/adminconsent":
+            self._handle_admin_consent(query)
+            return
         if not path.startswith("/v1.0/"):
             self._error(HTTPStatus.NOT_FOUND, "NotFound", f"No mock GET route for {path}")
             return
@@ -231,6 +237,27 @@ class GraphMockHandler(BaseHTTPRequestHandler):
             return
 
         self._error(HTTPStatus.NOT_FOUND, "itemNotFound", f"No Graph fixture for {path}")
+
+    def _handle_admin_consent(self, query: dict[str, list[str]]) -> None:
+        """Simulates Microsoft's tenant-level admin-consent redirect screen:
+        an admin clicking "Accept" (or "Cancel"), never a real sign-in. Only
+        `redirect_uri` and `state` matter — `client_id` is accepted but not
+        validated, same permissiveness as the rest of this contract mock.
+        """
+        redirect_uri = (query.get("redirect_uri") or [None])[0]
+        if not redirect_uri:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_request", "redirect_uri is required")
+            return
+        state = (query.get("state") or [""])[0]
+        if self.state.scenario == "admin_consent_denied":
+            params = {"error": "access_denied", "error_description": "Mock admin denied consent", "state": state}
+        else:
+            params = {"admin_consent": "True", "tenant": MOCK_TENANT_ID, "state": state}
+        location = f"{redirect_uri}?{urlencode(params)}"
+        self.send_response(HTTPStatus.FOUND)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _initial_items(self) -> list[dict]:
         return [
